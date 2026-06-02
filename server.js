@@ -32,9 +32,15 @@ app.use(helmet());
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      console.log("Origin recebida:", origin);
+      console.log("Allowed origins:", allowedOrigins);
+      if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      origin.endsWith('.netlify.app')
+    ) {
+      return callback(null, true);
+    }
       return callback(new Error('Origem não permitida pelo CORS.'));
     },
     credentials: true,

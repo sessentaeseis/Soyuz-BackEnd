@@ -56,7 +56,7 @@ const counters = {
 
 async function query(sql, params = []) {
   if (!pool) {
-    throw new Error('DATABASE_URL nao configurada. Usando armazenamento em memoria.');
+    throw new Error('DATABASE_URL não configurada. Usando armazenamento em memória.');
   }
 
   return pool.query(sql, params);
@@ -64,7 +64,7 @@ async function query(sql, params = []) {
 
 async function initDatabase() {
   if (!pool) {
-    console.warn('DATABASE_URL nao encontrada. API rodando em modo demo sem persistencia.');
+    console.warn('DATABASE_URL não encontrada. API rodando em modo demo sem persistência.');
     return;
   }
 
@@ -128,16 +128,59 @@ function parseTriggers(value) {
     .filter(Boolean);
 }
 
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function validateEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
+}
+
 function validateCrp(crp) {
   return /^\d{2}\/?\d{4,6}$/.test(String(crp || '').trim());
+}
+
+function validateUserData(data, { requirePassword = false } = {}) {
+  if (!String(data.name || '').trim() || !validateEmail(data.email)) {
+    const error = new Error('Informe um nome e um email válido.');
+    error.status = 400;
+    throw error;
+  }
+
+  if (requirePassword && (!data.password || String(data.password).length < 6)) {
+    const error = new Error('A senha precisa ter pelo menos 6 caracteres.');
+    error.status = 400;
+    throw error;
+  }
+}
+
+function mapDbError(error) {
+  if (error?.code === '23505') {
+    const message = String(error.constraint || '').includes('crp')
+      ? 'Este CRP já está cadastrado.'
+      : 'Este email já está cadastrado.';
+    const mapped = new Error(message);
+    mapped.status = 409;
+    return mapped;
+  }
+
+  return error;
+}
+
+async function runDb(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw mapDbError(error);
+  }
 }
 
 function makeRecommendation(entries) {
   if (!entries.length) {
     return {
       title: 'Primeiro registro',
-      summary: 'Comece com um check-in emocional breve para liberar analises personalizadas.',
-      actions: ['Registrar humor de hoje', 'Adicionar contexto do momento', 'Revisar recomendacoes depois de tres registros'],
+      summary: 'Comece com um check-in emocional breve para liberar análises personalizadas.',
+      actions: ['Registrar humor de hoje', 'Adicionar contexto do momento', 'Revisar recomendações depois de três registros'],
     };
   }
 
@@ -152,24 +195,36 @@ function makeRecommendation(entries) {
   if (average >= 7) {
     return {
       title: 'Intensidade elevada',
-      summary: `${mainEmotion} apareceu com intensidade media ${average.toFixed(1)} nos registros recentes.`,
-      actions: ['Agendar pausa guiada de 5 minutos', 'Compartilhar registros com profissional autorizado', 'Priorizar sono e reduzir estimulos antes de dormir'],
+      summary: `${mainEmotion} apareceu com intensidade média ${average.toFixed(1)} nos registros recentes.`,
+      actions: ['Agendar pausa guiada de 5 minutos', 'Compartilhar registros com profissional autorizado', 'Priorizar sono e reduzir estímulos antes de dormir'],
     };
   }
 
   if (average >= 4) {
     return {
-      title: 'Oscilacao moderada',
-      summary: `${mainEmotion} esta presente, mas ainda ha espaco para intervencoes simples.`,
-      actions: ['Fazer exercicio de respiracao quadrada', 'Anotar gatilhos recorrentes', 'Planejar uma atividade restauradora curta'],
+      title: 'Oscilação moderada',
+      summary: `${mainEmotion} está presente, mas ainda há espaço para intervenções simples.`,
+      actions: ['Fazer exercício de respiração quadrada', 'Anotar gatilhos recorrentes', 'Planejar uma atividade restauradora curta'],
     };
   }
 
   return {
     title: 'Boa estabilidade',
-    summary: `Os registros recentes mostram baixa intensidade media (${average.toFixed(1)}).`,
-    actions: ['Manter rotina de check-in', 'Registrar habitos que ajudaram', 'Revisar padroes semanalmente'],
+    summary: `Os registros recentes mostram baixa intensidade média (${average.toFixed(1)}).`,
+    actions: ['Manter rotina de check-in', 'Registrar hábitos que ajudaram', 'Revisar padrões semanalmente'],
   };
+}
+
+async function getUserById(id) {
+  if (!pool) {
+    return normalizeUser(memory.users.find((user) => user.id === Number(id)));
+  }
+
+  const result = await query(
+    'SELECT id, name, preferred_name, email, role, created_at FROM users WHERE id = $1 LIMIT 1',
+    [id],
+  );
+  return normalizeUser(result.rows[0]);
 }
 
 async function listUsers() {
@@ -182,18 +237,21 @@ async function listUsers() {
 }
 
 async function createUser(data) {
-  if (!data.name || !data.email) {
-    const error = new Error('Nome e email sao obrigatorios.');
-    error.status = 400;
-    throw error;
-  }
+  validateUserData(data);
 
   if (!pool) {
+    const email = normalizeEmail(data.email);
+    if (memory.users.some((user) => normalizeEmail(user.email) === email)) {
+      const error = new Error('Este email já está cadastrado.');
+      error.status = 409;
+      throw error;
+    }
+
     const user = {
       id: counters.users++,
-      name: data.name,
+      name: String(data.name).trim(),
       preferred_name: data.preferred_name || null,
-      email: data.email,
+      email,
       password: data.password ? await bcrypt.hash(data.password, 10) : '',
       role: data.role === 'professional' ? 'professional' : 'user',
       created_at: new Date().toISOString(),
@@ -203,12 +261,12 @@ async function createUser(data) {
   }
 
   const password = data.password ? await bcrypt.hash(data.password, 10) : '';
-  const result = await query(
+  const result = await runDb(() => query(
     `INSERT INTO users (name, preferred_name, email, password, role)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id, name, preferred_name, email, role, created_at`,
-    [data.name, data.preferred_name || null, data.email, password, data.role === 'professional' ? 'professional' : 'user'],
-  );
+    [String(data.name).trim(), data.preferred_name || null, normalizeEmail(data.email), password, data.role === 'professional' ? 'professional' : 'user'],
+  ));
   return normalizeUser(result.rows[0]);
 }
 
@@ -216,24 +274,37 @@ async function updateUser(id, data) {
   if (!pool) {
     const index = memory.users.findIndex((user) => user.id === Number(id));
     if (index === -1) return null;
+
+    if (data.email && !validateEmail(data.email)) {
+      const error = new Error('Informe um email válido.');
+      error.status = 400;
+      throw error;
+    }
+
     memory.users[index] = {
       ...memory.users[index],
       name: data.name ?? memory.users[index].name,
       preferred_name: data.preferred_name ?? memory.users[index].preferred_name,
-      email: data.email ?? memory.users[index].email,
+      email: data.email ? normalizeEmail(data.email) : memory.users[index].email,
     };
     return normalizeUser(memory.users[index]);
   }
 
-  const result = await query(
+  if (data.email && !validateEmail(data.email)) {
+    const error = new Error('Informe um email válido.');
+    error.status = 400;
+    throw error;
+  }
+
+  const result = await runDb(() => query(
     `UPDATE users
      SET name = COALESCE($1, name),
          preferred_name = COALESCE($2, preferred_name),
          email = COALESCE($3, email)
      WHERE id = $4
      RETURNING id, name, preferred_name, email, role, created_at`,
-    [data.name || null, data.preferred_name || null, data.email || null, id],
-  );
+    [data.name || null, data.preferred_name || null, data.email ? normalizeEmail(data.email) : null, id],
+  ));
   return normalizeUser(result.rows[0]);
 }
 
@@ -257,14 +328,10 @@ async function authenticateUser(email, password) {
 }
 
 async function registerUser(data) {
-  if (!data.password || String(data.password).length < 6) {
-    const error = new Error('A senha precisa ter pelo menos 6 caracteres.');
-    error.status = 400;
-    throw error;
-  }
+  validateUserData(data, { requirePassword: true });
 
   if (data.role === 'professional' && !validateCrp(data.crp)) {
-    const error = new Error('CRP invalido. Use o formato 06/123456 ou 06123456.');
+    const error = new Error('CRP inválido. Use o formato 06/123456 ou 06123456.');
     error.status = 400;
     throw error;
   }
@@ -314,22 +381,41 @@ async function listProfessionals() {
 
 async function createProfessional(data) {
   if (!data.name || !data.email || !data.crp) {
-    const error = new Error('Nome, email e CRP sao obrigatorios.');
+    const error = new Error('Nome, email e CRP são obrigatórios.');
+    error.status = 400;
+    throw error;
+  }
+
+  if (!validateEmail(data.email)) {
+    const error = new Error('Informe um email válido.');
     error.status = 400;
     throw error;
   }
 
   if (!validateCrp(data.crp)) {
-    const error = new Error('CRP invalido. Use o formato 06/123456 ou 06123456.');
+    const error = new Error('CRP inválido. Use o formato 06/123456 ou 06123456.');
     error.status = 400;
     throw error;
   }
 
   if (!pool) {
+    const email = normalizeEmail(data.email);
+    if (memory.professionals.some((professional) => normalizeEmail(professional.email) === email)) {
+      const error = new Error('Este email já está cadastrado.');
+      error.status = 409;
+      throw error;
+    }
+
+    if (memory.professionals.some((professional) => professional.crp === data.crp)) {
+      const error = new Error('Este CRP já está cadastrado.');
+      error.status = 409;
+      throw error;
+    }
+
     const professional = {
       id: counters.professionals++,
-      name: data.name,
-      email: data.email,
+      name: String(data.name).trim(),
+      email,
       crp: data.crp,
       specialty: data.specialty || null,
       verified: true,
@@ -339,18 +425,24 @@ async function createProfessional(data) {
     return professional;
   }
 
-  const result = await query(
+  const result = await runDb(() => query(
     `INSERT INTO professionals (name, email, crp, specialty, verified)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id, name, email, crp, specialty, verified, created_at`,
-    [data.name, data.email, data.crp, data.specialty || null, true],
-  );
+    [String(data.name).trim(), normalizeEmail(data.email), data.crp, data.specialty || null, true],
+  ));
   return result.rows[0];
 }
 
 async function updateProfessional(id, data) {
   if (data.crp && !validateCrp(data.crp)) {
-    const error = new Error('CRP invalido. Use o formato 06/123456 ou 06123456.');
+    const error = new Error('CRP inválido. Use o formato 06/123456 ou 06123456.');
+    error.status = 400;
+    throw error;
+  }
+
+  if (data.email && !validateEmail(data.email)) {
+    const error = new Error('Informe um email válido.');
     error.status = 400;
     throw error;
   }
@@ -361,7 +453,7 @@ async function updateProfessional(id, data) {
     memory.professionals[index] = {
       ...memory.professionals[index],
       name: data.name ?? memory.professionals[index].name,
-      email: data.email ?? memory.professionals[index].email,
+      email: data.email ? normalizeEmail(data.email) : memory.professionals[index].email,
       crp: data.crp ?? memory.professionals[index].crp,
       specialty: data.specialty ?? memory.professionals[index].specialty,
       verified: data.crp ? true : memory.professionals[index].verified,
@@ -369,7 +461,7 @@ async function updateProfessional(id, data) {
     return memory.professionals[index];
   }
 
-  const result = await query(
+  const result = await runDb(() => query(
     `UPDATE professionals
      SET name = COALESCE($1, name),
          email = COALESCE($2, email),
@@ -378,8 +470,8 @@ async function updateProfessional(id, data) {
          verified = COALESCE($5, verified)
      WHERE id = $6
      RETURNING id, name, email, crp, specialty, verified, created_at`,
-    [data.name || null, data.email || null, data.crp || null, data.specialty || null, data.crp ? true : null, id],
-  );
+    [data.name || null, data.email ? normalizeEmail(data.email) : null, data.crp || null, data.specialty || null, data.crp ? true : null, id],
+  ));
   return result.rows[0];
 }
 
@@ -395,11 +487,27 @@ async function deleteProfessional(id) {
   return result.rowCount > 0;
 }
 
-async function listMoodEntries(userId) {
+async function getMoodEntryById(id) {
+  if (!pool) {
+    return memory.moodEntries.find((entry) => entry.id === Number(id)) || null;
+  }
+
+  const result = await query(
+    'SELECT id, user_id, emotion, intensity, context, triggers, notes, created_at, updated_at FROM mood_entries WHERE id = $1 LIMIT 1',
+    [id],
+  );
+  return result.rows[0] || null;
+}
+
+async function listMoodEntries(userId, pagination = {}) {
+  const limit = Math.min(Math.max(Number(pagination.limit) || 500, 1), 500);
+  const offset = Math.max(Number(pagination.offset) || 0, 0);
+
   if (!pool) {
     return memory.moodEntries
       .filter((entry) => !userId || entry.user_id === Number(userId))
-      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(offset, offset + limit);
   }
 
   const params = [];
@@ -413,15 +521,16 @@ async function listMoodEntries(userId) {
     `SELECT id, user_id, emotion, intensity, context, triggers, notes, created_at, updated_at
      FROM mood_entries
      ${where}
-     ORDER BY created_at DESC, id DESC`,
-    params,
+     ORDER BY created_at DESC, id DESC
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, limit, offset],
   );
   return result.rows;
 }
 
 async function createMoodEntry(data) {
   if (!data.user_id || !data.emotion || !data.intensity) {
-    const error = new Error('Usuario, emocao e intensidade sao obrigatorios.');
+    const error = new Error('Usuário, emoção e intensidade são obrigatórios.');
     error.status = 400;
     throw error;
   }
@@ -518,7 +627,7 @@ async function deleteMoodEntry(id) {
 }
 
 async function getSummary(userId) {
-  const entries = await listMoodEntries(userId);
+  const entries = await listMoodEntries(userId, { limit: 500, offset: 0 });
   const average = entries.length
     ? entries.reduce((sum, entry) => sum + Number(entry.intensity), 0) / entries.length
     : 0;
@@ -540,6 +649,7 @@ async function getSummary(userId) {
 module.exports = {
   hasDatabaseUrl,
   initDatabase,
+  getUserById,
   authenticateUser,
   registerUser,
   listUsers,
@@ -551,6 +661,7 @@ module.exports = {
   updateProfessional,
   deleteProfessional,
   listMoodEntries,
+  getMoodEntryById,
   createMoodEntry,
   updateMoodEntry,
   deleteMoodEntry,

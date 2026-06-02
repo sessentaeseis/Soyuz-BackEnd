@@ -75,9 +75,26 @@ async function initDatabase() {
       context TEXT,
       triggers TEXT[] DEFAULT '{}',
       notes TEXT,
+      professional_notes TEXT,
+      reviewed_by INTEGER REFERENCES professionals(id) ON DELETE SET NULL,
+      reviewed_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS professional_patient_relationships (
+      id SERIAL PRIMARY KEY,
+      professional_id INTEGER NOT NULL REFERENCES professionals(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status VARCHAR(24) DEFAULT 'active',
+      assigned_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      UNIQUE(professional_id, user_id)
+    );
+
+    ALTER TABLE mood_entries ADD COLUMN IF NOT EXISTS professional_notes TEXT;
+    ALTER TABLE mood_entries ADD COLUMN IF NOT EXISTS reviewed_by INTEGER REFERENCES professionals(id) ON DELETE SET NULL;
+    ALTER TABLE mood_entries ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP;
   `);
 }
 
@@ -557,6 +574,9 @@ async function updateMoodEntry(id, data) {
       context: data.context ?? memory.moodEntries[index].context,
       triggers: data.triggers !== undefined ? parseTriggers(data.triggers) : memory.moodEntries[index].triggers,
       notes: data.notes ?? memory.moodEntries[index].notes,
+      professional_notes: data.professional_notes ?? memory.moodEntries[index].professional_notes,
+      reviewed_by: data.reviewed_by ? Number(data.reviewed_by) : memory.moodEntries[index].reviewed_by,
+      reviewed_at: data.reviewed_by ? new Date().toISOString() : memory.moodEntries[index].reviewed_at,
       updated_at: new Date().toISOString(),
     };
     return memory.moodEntries[index];
@@ -570,9 +590,12 @@ async function updateMoodEntry(id, data) {
          context = COALESCE($4, context),
          triggers = COALESCE($5, triggers),
          notes = COALESCE($6, notes),
+         professional_notes = COALESCE($7, professional_notes),
+         reviewed_by = COALESCE($8, reviewed_by),
+         reviewed_at = COALESCE($9, reviewed_at),
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $7
-     RETURNING id, user_id, emotion, intensity, context, triggers, notes, created_at, updated_at`,
+     WHERE id = $10
+     RETURNING id, user_id, emotion, intensity, context, triggers, notes, professional_notes, reviewed_by, reviewed_at, created_at, updated_at`,
     [
       data.user_id || null,
       data.emotion || null,
@@ -580,6 +603,9 @@ async function updateMoodEntry(id, data) {
       data.context || null,
       data.triggers !== undefined ? parseTriggers(data.triggers) : null,
       data.notes || null,
+      data.professional_notes || null,
+      data.reviewed_by ? Number(data.reviewed_by) : null,
+      data.reviewed_by ? new Date().toISOString() : null,
       id,
     ],
   );
@@ -596,6 +622,151 @@ async function deleteMoodEntry(id) {
 
   const result = await query('DELETE FROM mood_entries WHERE id = $1 RETURNING id', [id]);
   return result.rowCount > 0;
+}
+
+async function addProfessionalPatientRelationship(professionalId, userId, notes = null) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  if (!professionalId || !userId) {
+    const error = new Error('ID do profissional e ID do usuário são obrigatórios.');
+    error.status = 400;
+    throw error;
+  }
+
+  try {
+    const result = await query(
+      `INSERT INTO professional_patient_relationships (professional_id, user_id, notes)
+       VALUES ($1, $2, $3)
+       RETURNING id, professional_id, user_id, status, assigned_date, notes`,
+      [professionalId, userId, notes || null],
+    );
+    return result.rows[0];
+  } catch (error) {
+    if (error?.code === '23505') {
+      const err = new Error('Este relacionamento já existe.');
+      err.status = 409;
+      throw err;
+    }
+    throw error;
+  }
+}
+
+async function listPatientsByProfessional(professionalId, status = null) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  let where = 'WHERE professional_id = $1';
+  const params = [professionalId];
+  if (status) {
+    where += ' AND status = $2';
+    params.push(status);
+  }
+
+  const result = await query(
+    `SELECT ppr.id, ppr.professional_id, ppr.user_id, ppr.status, ppr.assigned_date, ppr.notes,
+            u.id as user_id, u.name, u.email, u.created_at as user_created_at
+     FROM professional_patient_relationships ppr
+     JOIN users u ON ppr.user_id = u.id
+     ${where}
+     ORDER BY ppr.assigned_date DESC`,
+    params,
+  );
+  return result.rows;
+}
+
+async function getProfessionalsByPatient(userId) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  const result = await query(
+    `SELECT ppr.id, ppr.professional_id, ppr.user_id, ppr.status, ppr.assigned_date, ppr.notes,
+            p.id as prof_id, p.name, p.email, p.crp, p.specialty, p.verified
+     FROM professional_patient_relationships ppr
+     JOIN professionals p ON ppr.professional_id = p.id
+     WHERE ppr.user_id = $1 AND ppr.status = 'active'
+     ORDER BY ppr.assigned_date DESC`,
+    [userId],
+  );
+  return result.rows;
+}
+
+async function updateRelationshipStatus(relationshipId, status) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  if (!['active', 'inactive', 'paused'].includes(status)) {
+    const error = new Error('Status inválido. Use: active, inactive ou paused.');
+    error.status = 400;
+    throw error;
+  }
+
+  const result = await query(
+    `UPDATE professional_patient_relationships
+     SET status = $1
+     WHERE id = $2
+     RETURNING id, professional_id, user_id, status, assigned_date, notes`,
+    [status, relationshipId],
+  );
+  return result.rows[0] || null;
+}
+
+async function removeProfessionalPatientRelationship(relationshipId) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  const result = await query(
+    'DELETE FROM professional_patient_relationships WHERE id = $1 RETURNING id',
+    [relationshipId],
+  );
+  return result.rowCount > 0;
+}
+
+async function reviewMoodEntry(entryId, professionalId, professionalNotes) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  if (!entryId || !professionalId) {
+    const error = new Error('ID da entrada e do profissional são obrigatórios.');
+    error.status = 400;
+    throw error;
+  }
+
+  const result = await query(
+    `UPDATE mood_entries
+     SET professional_notes = $1,
+         reviewed_by = $2,
+         reviewed_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $3
+     RETURNING id, user_id, emotion, intensity, context, triggers, notes, professional_notes, reviewed_by, reviewed_at, created_at, updated_at`,
+    [professionalNotes || null, professionalId, entryId],
+  );
+  return result.rows[0] || null;
+}
+
+async function getReviewedEntriesByProfessional(professionalId) {
+  if (!pool) {
+    throw new Error('Operação não suportada sem banco de dados configurado.');
+  }
+
+  const result = await query(
+    `SELECT me.id, me.user_id, me.emotion, me.intensity, me.context, me.triggers, me.notes, 
+            me.professional_notes, me.reviewed_by, me.reviewed_at, me.created_at, me.updated_at,
+            u.name, u.email
+     FROM mood_entries me
+     JOIN users u ON me.user_id = u.id
+     WHERE me.reviewed_by = $1
+     ORDER BY me.reviewed_at DESC, me.created_at DESC`,
+    [professionalId],
+  );
+  return result.rows;
 }
 
 function buildAnalytics(entries) {
@@ -728,4 +899,11 @@ module.exports = {
   updateMoodEntry,
   deleteMoodEntry,
   getSummary,
+  addProfessionalPatientRelationship,
+  listPatientsByProfessional,
+  getProfessionalsByPatient,
+  updateRelationshipStatus,
+  removeProfessionalPatientRelationship,
+  reviewMoodEntry,
+  getReviewedEntriesByProfessional,
 };

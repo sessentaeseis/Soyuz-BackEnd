@@ -289,6 +289,70 @@ app.get('/api/summary', requireAuth, asyncRoute(async (req, res) => {
   res.json(await db.getSummary(userId));
 }));
 
+// ===== PROFESSIONAL-PATIENT RELATIONSHIPS =====
+
+app.post('/api/professionals/:professionalId/patients/:userId', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const relationship = await db.addProfessionalPatientRelationship(
+    req.params.professionalId,
+    req.params.userId,
+    req.body.notes || null,
+  );
+  res.status(201).json(relationship);
+}));
+
+app.get('/api/professionals/:professionalId/patients', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const patients = await db.listPatientsByProfessional(req.params.professionalId, req.query.status);
+  res.json(patients);
+}));
+
+app.get('/api/users/:userId/professionals', requireAuth, asyncRoute(async (req, res) => {
+  if (!canAccessUser(req, req.params.userId)) {
+    return res.status(403).json({ message: 'Você não pode acessar informações de outro usuário.' });
+  }
+
+  const professionals = await db.getProfessionalsByPatient(req.params.userId);
+  res.json(professionals);
+}));
+
+app.put('/api/relationships/:relationshipId/status', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const updated = await db.updateRelationshipStatus(req.params.relationshipId, req.body.status);
+  if (!updated) return notFound(res, 'Relacionamento');
+  res.json(updated);
+}));
+
+app.delete('/api/relationships/:relationshipId', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const deleted = await db.removeProfessionalPatientRelationship(req.params.relationshipId);
+  if (!deleted) return notFound(res, 'Relacionamento');
+  res.status(204).send();
+}));
+
+// ===== MOOD ENTRIES REVIEWS =====
+
+app.put('/api/mood-entries/:entryId/review', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const entry = await db.getMoodEntryById(req.params.entryId);
+  if (!entry) return notFound(res, 'Registro emocional');
+
+  // Verifica se o profissional tem relação com o paciente
+  const patients = await db.listPatientsByProfessional(req.user.id, 'active');
+  const hasAccess = patients.some((p) => Number(p.user_id) === Number(entry.user_id));
+
+  if (!hasAccess) {
+    return res.status(403).json({ message: 'Você só pode revisar registros de seus pacientes.' });
+  }
+
+  const reviewed = await db.reviewMoodEntry(
+    req.params.entryId,
+    req.user.id,
+    req.body.professional_notes || null,
+  );
+  res.json(reviewed);
+}));
+
+app.get('/api/professionals/:professionalId/reviewed-entries', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+  const entries = await db.getReviewedEntriesByProfessional(req.params.professionalId);
+  res.json(entries);
+}));
+
 app.use((req, res) => {
   res.status(404).json({ message: 'Rota não encontrada.' });
 });

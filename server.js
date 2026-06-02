@@ -313,5 +313,12 @@ db.initDatabase()
   })
   .catch((error) => {
     console.error('Falha ao inicializar o banco de dados:', error);
+    if (error && error.code === 'ENOTFOUND') {
+      console.error(
+        'Erro ENOTFOUND: o hostname do `DATABASE_URL` nao foi resolvido (DNS). ' +
+        'Tente copiar novamente a connection string do Supabase (preferindo "Transaction pooler"), ' +
+        'e verifique se sua rede/DNS (VPN, firewall corporativo) permite acesso aos endpoints do Supabase.'
+      );
+    }
     process.exit(1);
   });

@@ -104,6 +104,12 @@ function normalizeUser(row) {
   return { ...safeUser, role: safeUser.role || 'user' };
 }
 
+function normalizeRole(role, { allowAdmin = true } = {}) {
+  if (role === 'admin' && allowAdmin) return 'admin';
+  if (role === 'professional') return 'professional';
+  return 'user';
+}
+
 function parseTriggers(value) {
   if (Array.isArray(value)) {
     return value.map(String).map((item) => item.trim()).filter(Boolean);
@@ -242,7 +248,7 @@ async function createUser(data) {
       preferred_name: data.preferred_name || null,
       email,
       password: data.password ? await bcrypt.hash(data.password, 10) : '',
-      role: data.role === 'professional' ? 'professional' : 'user',
+      role: normalizeRole(data.role),
       created_at: new Date().toISOString(),
     };
     memory.users.unshift(user);
@@ -254,7 +260,7 @@ async function createUser(data) {
     `INSERT INTO users (name, preferred_name, email, password, role)
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id, name, preferred_name, email, role, created_at`,
-    [String(data.name).trim(), data.preferred_name || null, normalizeEmail(data.email), password, data.role === 'professional' ? 'professional' : 'user'],
+    [String(data.name).trim(), data.preferred_name || null, normalizeEmail(data.email), password, normalizeRole(data.role)],
   ));
   return normalizeUser(result.rows[0]);
 }
@@ -275,6 +281,7 @@ async function updateUser(id, data) {
       name: data.name ?? memory.users[index].name,
       preferred_name: data.preferred_name ?? memory.users[index].preferred_name,
       email: data.email ? normalizeEmail(data.email) : memory.users[index].email,
+      role: data.role ? normalizeRole(data.role) : memory.users[index].role,
     };
     return normalizeUser(memory.users[index]);
   }
@@ -289,10 +296,11 @@ async function updateUser(id, data) {
     `UPDATE users
      SET name = COALESCE($1, name),
          preferred_name = COALESCE($2, preferred_name),
-         email = COALESCE($3, email)
-     WHERE id = $4
+         email = COALESCE($3, email),
+         role = COALESCE($4, role)
+     WHERE id = $5
      RETURNING id, name, preferred_name, email, role, created_at`,
-    [data.name || null, data.preferred_name || null, data.email ? normalizeEmail(data.email) : null, id],
+    [data.name || null, data.preferred_name || null, data.email ? normalizeEmail(data.email) : null, data.role ? normalizeRole(data.role) : null, id],
   ));
   return normalizeUser(result.rows[0]);
 }
@@ -317,29 +325,31 @@ async function authenticateUser(email, password) {
 }
 
 async function registerUser(data) {
-  validateUserData(data, { requirePassword: true });
+  const publicData = { ...data, role: normalizeRole(data.role, { allowAdmin: false }) };
 
-  if (data.role === 'professional' && !validateCrp(data.crp)) {
+  validateUserData(publicData, { requirePassword: true });
+
+  if (publicData.role === 'professional' && !validateCrp(publicData.crp)) {
     const error = new Error('CRP inválido. Use o formato 06/123456 ou 06123456.');
     error.status = 400;
     throw error;
   }
 
-  const existing = await findUserByEmail(data.email);
+  const existing = await findUserByEmail(publicData.email);
   if (existing) {
     const error = new Error('Este email ja esta cadastrado.');
     error.status = 409;
     throw error;
   }
 
-  const user = await createUser(data);
+  const user = await createUser(publicData);
 
-  if (data.role === 'professional') {
+  if (publicData.role === 'professional') {
     await createProfessional({
-      name: data.name,
-      email: data.email,
-      crp: data.crp,
-      specialty: data.specialty,
+      name: publicData.name,
+      email: publicData.email,
+      crp: publicData.crp,
+      specialty: publicData.specialty,
     });
   }
 

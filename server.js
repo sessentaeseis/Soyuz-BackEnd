@@ -132,20 +132,36 @@ function isProfessional(user) {
   return user?.role === 'professional';
 }
 
+function isAdmin(user) {
+  return user?.role === 'admin';
+}
+
+function isStaff(user) {
+  return isProfessional(user) || isAdmin(user);
+}
+
 function requireProfessional(req, res, next) {
-  if (!isProfessional(req.user)) {
+  if (!isStaff(req.user)) {
     return res.status(403).json({ message: 'Acesso restrito a profissionais cadastrados.' });
   }
 
   return next();
 }
 
+function requireAdmin(req, res, next) {
+  if (!isAdmin(req.user)) {
+    return res.status(403).json({ message: 'Acesso restrito a administradores.' });
+  }
+
+  return next();
+}
+
 function canAccessUser(req, userId) {
-  return isProfessional(req.user) || Number(req.user.id) === Number(userId);
+  return isStaff(req.user) || Number(req.user.id) === Number(userId);
 }
 
 async function canAccessMoodEntry(req, entryId) {
-  if (isProfessional(req.user)) return true;
+  if (isStaff(req.user)) return true;
 
   const entry = await db.getMoodEntryById(entryId);
   return Number(entry?.user_id) === Number(req.user.id);
@@ -205,7 +221,7 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 });
 
 app.get('/api/users', requireAuth, asyncRoute(async (req, res) => {
-  if (!isProfessional(req.user)) {
+  if (!isStaff(req.user)) {
     return res.json([req.user]);
   }
 
@@ -213,7 +229,7 @@ app.get('/api/users', requireAuth, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/users', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
-  const user = await db.createUser(sanitizeUserPayload(req.body));
+  const user = await db.createUser(sanitizeUserPayload(req.body, isAdmin(req.user)));
   res.status(201).json(user);
 }));
 
@@ -222,13 +238,13 @@ app.put('/api/users/:id', requireAuth, asyncRoute(async (req, res) => {
     return res.status(403).json({ message: 'Você só pode alterar a própria conta.' });
   }
 
-  const user = await db.updateUser(req.params.id, sanitizeUserPayload(req.body));
+  const user = await db.updateUser(req.params.id, sanitizeUserPayload(req.body, isAdmin(req.user)));
   if (!user) return notFound(res, 'Usuário');
 
   return res.json(user);
 }));
 
-app.delete('/api/users/:id', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const deleted = await db.deleteUser(req.params.id);
   if (!deleted) return notFound(res, 'Usuário');
   return res.status(204).send();
@@ -249,7 +265,7 @@ app.put('/api/professionals/:id', requireAuth, requireProfessional, asyncRoute(a
   return res.json(professional);
 }));
 
-app.delete('/api/professionals/:id', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
+app.delete('/api/professionals/:id', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
   const deleted = await db.deleteProfessional(req.params.id);
   if (!deleted) return notFound(res, 'Profissional');
   return res.status(204).send();
@@ -257,14 +273,14 @@ app.delete('/api/professionals/:id', requireAuth, requireProfessional, asyncRout
 
 // FIX: Retorna array diretamente (sem wrapper paginado) para compatibilidade com o frontend.
 app.get('/api/mood-entries', requireAuth, asyncRoute(async (req, res) => {
-  const userId = isProfessional(req.user) ? req.query.userId : req.user.id;
+  const userId = isStaff(req.user) ? req.query.userId : req.user.id;
   const pagination = parsePagination(req.query);
   const entries = await db.listMoodEntries(userId, pagination);
   res.json(entries);
 }));
 
 app.post('/api/mood-entries', requireAuth, asyncRoute(async (req, res) => {
-  const body = isProfessional(req.user) ? req.body : { ...req.body, user_id: req.user.id };
+  const body = isStaff(req.user) ? req.body : { ...req.body, user_id: req.user.id };
   const entry = await db.createMoodEntry(body);
   res.status(201).json(entry);
 }));
@@ -274,7 +290,7 @@ app.put('/api/mood-entries/:id', requireAuth, asyncRoute(async (req, res) => {
     return notFound(res, 'Registro emocional');
   }
 
-  const body = isProfessional(req.user) ? req.body : { ...req.body, user_id: req.user.id };
+  const body = isStaff(req.user) ? req.body : { ...req.body, user_id: req.user.id };
   const entry = await db.updateMoodEntry(req.params.id, body);
   if (!entry) return notFound(res, 'Registro emocional');
   return res.json(entry);
@@ -291,7 +307,7 @@ app.delete('/api/mood-entries/:id', requireAuth, asyncRoute(async (req, res) => 
 }));
 
 app.get('/api/summary', requireAuth, asyncRoute(async (req, res) => {
-  const userId = isProfessional(req.user) ? req.query.userId : req.user.id;
+  const userId = isStaff(req.user) ? req.query.userId : req.user.id;
   res.json(await db.getSummary(userId));
 }));
 

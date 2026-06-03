@@ -250,6 +250,18 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, asyncRoute(async (req, r
   return res.status(204).send();
 }));
 
+// Promover/rebaixar role — apenas admin
+app.patch('/api/users/:id/role', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  const { role } = req.body;
+  const allowed = ['user', 'professional', 'admin'];
+  if (!allowed.includes(role)) {
+    return res.status(400).json({ message: 'Role inválido. Use: user, professional ou admin.' });
+  }
+  const updated = await db.updateUser(Number(req.params.id), { role });
+  if (!updated) return res.status(404).json({ message: 'Usuário não encontrado.' });
+  res.json(updated);
+}));
+
 app.get('/api/professionals', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
   res.json(await db.listProfessionals());
 }));

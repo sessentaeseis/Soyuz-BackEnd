@@ -286,6 +286,8 @@ async function updateUser(id, data) {
     return normalizeUser(memory.users[index]);
   }
 
+
+
   if (data.email && !validateEmail(data.email)) {
     const error = new Error('Informe um email válido.');
     error.status = 400;

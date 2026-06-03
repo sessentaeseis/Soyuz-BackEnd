@@ -48,12 +48,16 @@ async function initDatabase() {
       email VARCHAR(255) UNIQUE NOT NULL,
       password VARCHAR(255) DEFAULT '',
       role VARCHAR(24) DEFAULT 'user',
+      is_premium BOOLEAN DEFAULT FALSE,
+      premium_expires_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
     ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_name VARCHAR(120);
     ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255) DEFAULT '';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(24) DEFAULT 'user';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS premium_expires_at TIMESTAMP;
     ALTER TABLE users ALTER COLUMN password SET DEFAULT '';
     ALTER TABLE users ALTER COLUMN password DROP NOT NULL;
 
@@ -101,7 +105,12 @@ async function initDatabase() {
 function normalizeUser(row) {
   if (!row) return null;
   const { password, ...safeUser } = row;
-  return { ...safeUser, role: safeUser.role || 'user' };
+  return {
+    ...safeUser,
+    role: safeUser.role || 'user',
+    isPremium: safeUser.is_premium || false,
+    premiumExpiresAt: safeUser.premium_expires_at,
+  };
 }
 
 function normalizeRole(role, { allowAdmin = true } = {}) {
@@ -216,7 +225,7 @@ async function getUserById(id) {
   }
 
   const result = await query(
-    'SELECT id, name, preferred_name, email, role, created_at FROM users WHERE id = $1 LIMIT 1',
+    'SELECT id, name, preferred_name, email, role, is_premium, premium_expires_at, created_at FROM users WHERE id = $1 LIMIT 1',
     [id],
   );
   return normalizeUser(result.rows[0]);
@@ -226,7 +235,7 @@ async function listUsers() {
   if (!pool) return memory.users.map(normalizeUser);
 
   const result = await query(
-    'SELECT id, name, preferred_name, email, role, created_at FROM users ORDER BY created_at DESC, id DESC',
+    'SELECT id, name, preferred_name, email, role, is_premium, premium_expires_at, created_at FROM users ORDER BY created_at DESC, id DESC',
   );
   return result.rows.map(normalizeUser);
 }
@@ -257,10 +266,10 @@ async function createUser(data) {
 
   const password = data.password ? await bcrypt.hash(data.password, 10) : '';
   const result = await runDb(() => query(
-    `INSERT INTO users (name, preferred_name, email, password, role)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, preferred_name, email, role, created_at`,
-    [String(data.name).trim(), data.preferred_name || null, normalizeEmail(data.email), password, normalizeRole(data.role)],
+    `INSERT INTO users (name, preferred_name, email, password, role, is_premium, premium_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, name, preferred_name, email, role, is_premium, premium_expires_at, created_at`,
+    [String(data.name).trim(), data.preferred_name || null, normalizeEmail(data.email), password, normalizeRole(data.role), false, null],
   ));
   return normalizeUser(result.rows[0]);
 }
@@ -282,6 +291,8 @@ async function updateUser(id, data) {
       preferred_name: data.preferred_name ?? memory.users[index].preferred_name,
       email: data.email ? normalizeEmail(data.email) : memory.users[index].email,
       role: data.role ? normalizeRole(data.role) : memory.users[index].role,
+      is_premium: data.is_premium ?? memory.users[index].is_premium,
+      premium_expires_at: data.premium_expires_at ?? memory.users[index].premium_expires_at,
     };
     return normalizeUser(memory.users[index]);
   }
@@ -299,11 +310,32 @@ async function updateUser(id, data) {
      SET name = COALESCE($1, name),
          preferred_name = COALESCE($2, preferred_name),
          email = COALESCE($3, email),
-         role = COALESCE($4, role)
-     WHERE id = $5
-     RETURNING id, name, preferred_name, email, role, created_at`,
-    [data.name || null, data.preferred_name || null, data.email ? normalizeEmail(data.email) : null, data.role ? normalizeRole(data.role) : null, id],
+         role = COALESCE($4, role),
+         is_premium = COALESCE($5, is_premium),
+         premium_expires_at = COALESCE($6, premium_expires_at)
+     WHERE id = $7
+     RETURNING id, name, preferred_name, email, role, is_premium, premium_expires_at, created_at`,
+    [data.name || null, data.preferred_name || null, data.email ? normalizeEmail(data.email) : null, data.role ? normalizeRole(data.role) : null, data.is_premium ?? null, data.premium_expires_at ?? null, id],
   ));
+  return normalizeUser(result.rows[0]);
+}
+
+async function updateUserPremiumStatus(id, isPremium, expiresAt = null) {
+  if (!pool) {
+    const index = memory.users.findIndex((user) => user.id === Number(id));
+    if (index === -1) return null;
+    memory.users[index].is_premium = isPremium;
+    memory.users[index].premium_expires_at = expiresAt;
+    return normalizeUser(memory.users[index]);
+  }
+
+  const result = await query(
+    `UPDATE users
+     SET is_premium = $1, premium_expires_at = $2
+     WHERE id = $3
+     RETURNING id, name, preferred_name, email, role, is_premium, premium_expires_at, created_at`,
+    [isPremium, expiresAt, id],
+  );
   return normalizeUser(result.rows[0]);
 }
 
@@ -900,6 +932,7 @@ module.exports = {
   listUsers,
   createUser,
   updateUser,
+  updateUserPremiumStatus,
   deleteUser,
   listProfessionals,
   createProfessional,

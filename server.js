@@ -262,6 +262,24 @@ app.patch('/api/users/:id/role', requireAuth, requireAdmin, asyncRoute(async (re
   res.json(updated);
 }));
 
+// Ativar/desativar premium — usuário próprio ou admin
+app.patch('/api/users/:id/premium', requireAuth, asyncRoute(async (req, res) => {
+  const userId = Number(req.params.id);
+  const currentUser = req.user;
+
+  // Usuário só pode alterar seu próprio premium, ou admin pode alterar qualquer um
+  if (currentUser.id !== userId && currentUser.role !== 'admin') {
+    return res.status(403).json({ message: 'Você só pode alterar seu próprio plano premium.' });
+  }
+
+  const { isPremium, premiumExpiresAt } = req.body;
+  const expiresAt = premiumExpiresAt ? new Date(premiumExpiresAt) : null;
+
+  const updated = await db.updateUserPremiumStatus(userId, isPremium, expiresAt);
+  if (!updated) return res.status(404).json({ message: 'Usuário não encontrado.' });
+  res.json(updated);
+}));
+
 app.get('/api/professionals', requireAuth, requireProfessional, asyncRoute(async (req, res) => {
   res.json(await db.listProfessionals());
 }));
